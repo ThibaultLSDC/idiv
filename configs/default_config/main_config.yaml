@@ -1,0 +1,7 @@
+epochs: 10
+
+optim: !optim
+  learning_rate: 1e-4
+
+---
+vae_config_path: vqvae_config.yaml

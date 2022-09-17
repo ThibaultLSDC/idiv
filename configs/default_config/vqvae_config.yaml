@@ -1,0 +1,14 @@
+--- !vqvae
+
+encoder: !encoder
+  dim: 64
+
+codebook: !codebook
+  latent_dim: 512
+  code_size: 1024
+  beta: 0.1
+
+decoder: !decoder
+  dim: 64
+
+epochs: 10 # for testing vqvae only
