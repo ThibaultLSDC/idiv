@@ -131,6 +131,7 @@ class Classifier:
         if params is None or opt_state is None:
             key, subkey = random.split(key)
             params, opt_state = self.init_state(subkey, x_train[0])
+            print(type(opt_state))
 
         for epoch in range(epochs):
             running_acc = 0.0

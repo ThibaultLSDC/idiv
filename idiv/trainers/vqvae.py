@@ -24,7 +24,7 @@ class VQVAE:
 
         self.init = transformed.init
 
-        self.encode, self.quantize, self.decode = transformed.apply
+        self.encode, self.quantize, self.decode, self.embed = transformed.apply
 
     @staticmethod
     def build(config):
@@ -43,12 +43,17 @@ class VQVAE:
             def decode(x, is_training):
                 return decoder(x, is_training)
             
+            def embed(x):
+                return codebook.embed(x)
+            
             def init(x, is_training):
                 latent = encode(x, is_training)
                 quantize = code(latent)
-                return decode(quantize.quantize, is_training)
+                output = decode(quantize.quantize, is_training)
+                z_q = embed(quantize.indices)
+                return output, z_q
             
-            return init, (encode, code, decode)
+            return init, (encode, code, decode, embed)
 
         return f
     
@@ -59,11 +64,8 @@ class VQVAE:
 
     def forward(self, params: hk.Params, state: hk.State, x, is_training: bool):
         latent, state = self.encode(params, state, None, x, is_training)
-        print(latent.shape)
         quantize, state = self.quantize(params, state, None, latent)
-        print(quantize.quantize.shape)
         res, state = self.decode(params, state, None, quantize.quantize, is_training)
-        print(res.shape)
         return {
             'pred': res,
             'state': state,
@@ -98,10 +100,10 @@ class VQVAE:
         (loss, (pred, state)), grads = vgrad(self.loss_and_pred, has_aux=True)(
         params, state, x, True
         )
-        print(loss, pred.shape)
+
         updates, opt_state = self.optim.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
-        return params, opt_state, state, loss, pred
+        return params, state, opt_state, loss, pred
 
     def fit(self,
             key: rd.KeyArray,
@@ -120,9 +122,16 @@ class VQVAE:
             running_loss = 0.
             for x in tqdm(x_train, desc=f"Epoch {epoch}"):
                 params, state, opt_state, loss, pred = self.update(params, state, opt_state, x)
-                running_loss += loss / x_train[0]
+                running_loss += loss / x_train.shape[0]
         
-        print(f"epoch {epoch}/{self.config.epochs} | loss {running_loss: .3f}")
+            print(f"epoch {epoch+1}/{self.config.epochs} | loss {running_loss:.3f}")
+
+        img = x_train[0]
+        pred = self.forward(params, state, img, False)
+        print(pred['pred'].shape)
+        pred = (np.array(pred['pred']).squeeze(0).clip(-1, 1) * 127.5 + 127.5).astype(np.uint8)
+
+        Image.fromarray(pred).save('data/test.jpg')
 
         return params, state, opt_state
 

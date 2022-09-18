@@ -1,4 +1,5 @@
 from collections import namedtuple
+from multiprocessing import dummy
 from idiv.models import *
 import haiku as hk
 import jax.numpy as jnp
@@ -119,3 +120,48 @@ class TestVAE:
             is_training=True)
         
         assert batch.shape == output.shape
+
+
+@pytest.fixture(scope='class')
+def attention() -> Output:
+    @hk.transform
+    def forward(x):
+        net = MHAttention()
+        return net(x)
+
+    key1, key2 = rd.split(rd.PRNGKey(0))
+
+    dummy = jnp.ones((4, 8, 8, 32))
+
+    params = forward.init(key1, dummy)
+    output = forward.apply(params, key2, dummy, True)
+
+    return Output(forward, params, None, output)
+
+
+@pytest.fixture(scope='class')
+def norm() -> Output:
+    @hk.transform_with_state
+    def f(x, is_training):
+        net = ConvBlock()
+        return prenorm(x, net, is_training)
+    
+    key = rd.PRNGKey(0)
+    dummy = jnp.ones((4, 32, 32, 16))
+
+    params, state = f.init(key, dummy, True)
+    output, state = f.apply(params, state, None, dummy, True)
+
+    return Output(f, params, None, output)
+
+
+class TestAttention:
+    def test_attn_shape(self, attention):
+        assert attention.output[0].shape == (4, 8, 8, 32)
+        assert attention.output[1].shape == (4, 4, 8**2, 8**2)
+    
+    def test_prenorm(self, norm):
+        param = norm.params['layer_norm']['layer_norm']
+        assert param.shape == (1, 1, 1, 16)
+        assert norm.output.shape == (4, 32, 32, 16)
+        assert jnp.mean(norm.output) <= 1e-5

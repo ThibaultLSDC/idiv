@@ -11,4 +11,4 @@ codebook: !codebook
 decoder: !decoder
   dim: 64
 
-epochs: 10 # for testing vqvae only
+epochs: 20000 # for testing vqvae only

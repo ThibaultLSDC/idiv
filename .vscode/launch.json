@@ -8,7 +8,7 @@
             "name": "Python: Module",
             "type": "python",
             "request": "launch",
-            "module": "idiv.vqvae",
+            "module": "idiv.trainers.ddpm",
             "justMyCode": true
         }
     ]

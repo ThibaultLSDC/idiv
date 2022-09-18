@@ -1,0 +1,8 @@
+--- !test_ddpm
+dim: 64
+
+betas_low: 0.0001
+betas_high: 0.01
+T: 1000
+
+epochs: 10000
