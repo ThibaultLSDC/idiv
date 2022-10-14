@@ -125,16 +125,16 @@ class TestVAE:
 @pytest.fixture(scope='class')
 def attention() -> Output:
     @hk.transform
-    def forward(x):
-        net = MHAttention()
-        return net(x)
+    def forward(x, return_attn):
+        net = Attention()
+        return net(x, return_attn)
 
     key1, key2 = rd.split(rd.PRNGKey(0))
 
     dummy = jnp.ones((4, 8, 8, 32))
 
-    params = forward.init(key1, dummy)
-    output = forward.apply(params, key2, dummy, True)
+    params = forward.init(key1, dummy, return_attn=True)
+    output = forward.apply(params, key2, dummy, return_attn=True)
 
     return Output(forward, params, None, output)
 
@@ -155,6 +155,23 @@ def norm() -> Output:
     return Output(f, params, None, output)
 
 
+@pytest.fixture(scope='class')
+def sinembedding() -> Output:
+    @hk.transform
+    def forward(x):
+        net = SinEmbedding(16)
+        return net(x)
+    
+    key1, key2 = rd.split(rd.PRNGKey(0))
+
+    dummy= jnp.arange(0., 8., 1.)
+
+    params = forward.init(key1, dummy)
+    output = forward.apply(params, key2, dummy)
+
+    return Output(forward, params, None, output)
+
+
 class TestAttention:
     def test_attn_shape(self, attention):
         assert attention.output[0].shape == (4, 8, 8, 32)
@@ -165,3 +182,6 @@ class TestAttention:
         assert param.shape == (1, 1, 1, 16)
         assert norm.output.shape == (4, 32, 32, 16)
         assert jnp.mean(norm.output) <= 1e-5
+
+    def test_sin_embedding(self, sinembedding):
+        assert sinembedding.output.shape == (8, 16)
