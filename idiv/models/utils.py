@@ -1,9 +1,15 @@
+from typing import Optional, Tuple
 import haiku as hk
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from einops import rearrange
 from jax.numpy import einsum
+
+
+def exists(thing):
+    return not thing is None
 
 
 class ConvBlock(hk.Module):
@@ -38,7 +44,7 @@ def residual(f):
     return res
 
 
-class MHAttention(hk.Module):
+class Attention(hk.Module):
     def __init__(self, heads: int=4, head_dim: int=32, scale: float=1.):
         super().__init__()
         self.heads = heads
@@ -113,9 +119,55 @@ class UpSample(hk.Module):
 
 
 class SinEmbedding(hk.Module):
-    def __init__(self, dim):
+    def __init__(self, time_dim):
         super().__init__()
-        self.dim = dim
+        self.time_dim = time_dim
     
-    def __call__(self, t):
-        pass
+    def __call__(self, t: jnp.DeviceArray):
+        assert t.ndim == 1
+        half_dim = self.time_dim//2
+        emb = np.log(10000) / (half_dim-1)
+        emb = jnp.exp(jnp.arange(0, half_dim, step=1) * -emb)
+        emb = t[:, None] * emb[None, :]
+        emb = jnp.concatenate((jnp.sin(emb), jnp.cos(emb)), axis=-1)
+        return emb
+
+
+class Block(hk.Module):
+    def __init__(self, out_dim: int, groups: int=8, name: Optional[str] = None):
+        super().__init__(name)
+
+        self.out_dim = out_dim
+        self.groups = groups
+    
+    def __call__(self, x: jnp.DeviceArray, scale_shift: Optional[Tuple]=None):
+        x = hk.Conv2D(self.out_dim, 3, padding=1)(x)
+        x = hk.GroupNorm(self.groups)(x)
+
+        if exists(scale_shift):
+            scale, shift = scale_shift
+            x = (1 + scale) * x + shift
+        x = jax.nn.silu(x)
+        return x
+
+
+class ResBlock(hk.Module):
+    def __init__(self, out_dim: int, groups: int, time_dim: Optional[int]=None, name: Optional[str] = None):
+        super().__init__(name)
+        self.out_dim = out_dim
+        self.groups = groups
+        self.time_dim = time_dim
+    
+    def __call__(self, x, time_emb=None):
+        
+        scale_shift = None
+        if exists(self.time_dim) and exists(time_emb):
+            time_emb = hk.Linear(self.time_dim*2)(jax.nn.silu(time_emb))
+            time_emb = time_emb[:, :, None, None]
+            scale_shift = jnp.split(time_emb, 2, axis=1)
+        
+        h = Block(self.out_dim, self.groups)(x, scale_shift=scale_shift)
+        h = Block(self.out_dim, self.groups)(h)
+        res = hk.Conv2D(self.out_dim, 1)(x)
+        return res + h
+
