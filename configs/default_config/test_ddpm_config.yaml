@@ -6,3 +6,13 @@ betas_high: 0.01
 T: 1000
 
 epochs: 10000
+
+unet_config: !unet_config
+  dim: 32
+  out_dim: 3
+  mults:
+    - 1
+    - 2
+    - 4
+    - 8
+  resblock_groups: 8
