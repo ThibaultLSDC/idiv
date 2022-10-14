@@ -8,6 +8,7 @@ import jax.random as rd
 from jax import jit, value_and_grad as vgrad
 from tqdm import tqdm
 import jax
+import numpy as np
 
 from idiv.models.unet import UNet64
 
@@ -38,7 +39,7 @@ class DDPM:
         self.init = transformed.init
         self.apply = transformed.apply
 
-        self.betas = jnp.arange(config.betas_low, config.betas_high, config.T, dtype=jnp.float32)
+        self.betas = jnp.linspace(config.betas_low, config.betas_high, config.T, dtype=jnp.float32)
         self.alphas = 1 - self.betas.copy()
         self.alpha_cumprod = jnp.cumprod(self.alphas)
 
@@ -67,7 +68,7 @@ class DDPM:
 
         key, subkey = rd.split(key)
         t = rd.randint(subkey, (bs,), 0, self.T)
-        alphas_cp = self.alpha_cumprod[t]
+        alphas_cp = jnp.expand_dims(self.alpha_cumprod[t], axis=[1, 2, 3])
 
         key, subkey = rd.split(key)
         eps = rd.normal(subkey, x.shape)
@@ -109,9 +110,41 @@ class DDPM:
                 params, state, opt_state, loss = self.update(params, state, opt_state, subkey, x)
                 running_loss += loss / x_train.shape[0]
 
-            print(f"Epoch {epoch+1}/{self.config.epochs} | loss {running_loss:.3f}")
+            print(f"Epoch {epoch+1}/{self.config.epochs} | loss {running_loss:.5f}")
+
+        x = self.sample(params, state, key)
+        print('done sampling')
+        y = np.array(x)
+        print('done array')
+        x_0 = (y.clip(-1, 1) + 1) * 127.5
+
+        print('done with sampling, saving image')
+
+        Image.fromarray(x_0[0].astype(np.uint8)).save('data/sampling.jpg')
 
         return params, state, opt_state
+    
+    # @partial(jit, static_argnums=0)
+    def img_estimate(self, params: hk.Params, state: hk.State, x_t, t):
+        eps, state = self.forward(params, state, x_t, is_training=False)
+        x_0_estimate = (x_t - jnp.sqrt(1 - self.alpha_cumprod[t]) * eps) / jnp.sqrt(self.alpha_cumprod[t])
+        return x_0_estimate, eps, state
+    
+    # @partial(jit, static_argnums=0)
+    def sample_one(self, params: hk.Params, state: hk.State, x_t, t):
+        x_0, eps, state = self.img_estimate(params, state, x_t, t)
+        x_prev = jnp.sqrt(self.alpha_cumprod[t-1]) * x_0 + jnp.sqrt(1 - self.alpha_cumprod[t-1]) * eps
+        return x_prev, state
+    
+    # @partial(jit, static_argnums=0)
+    def sample(self, params: hk.Params, state: hk.State, key: rd.KeyArray, x_T_shape=(1, 64, 64, 3)):
+        x_prev = rd.normal(key, x_T_shape)
+        self.alpha_cumprod = jnp.concatenate((jnp.ones((1,)), self.alpha_cumprod))
+        for t in tqdm(range(self.T, 0, -1), desc='sampling...'):
+            x_prev, state = self.sample_one(params, state, x_prev, t)
+        self.alpha_cumprod = self.alpha_cumprod[1:]
+        print('done inside')
+        return x_prev
 
 
 if __name__=='__main__':
@@ -122,17 +155,19 @@ if __name__=='__main__':
 
     import jax
 
-    img = jnp.array(Image.open('/home/ty/Documents/code/jax-rl/data/risitas.jpg'), dtype=jnp.float32)
+    img = jnp.array(Image.open('/home/ty/Documents/code/idiv/data/risitas.jpg'), dtype=jnp.float32)
 
     img = jax.image.resize(img / 127.5 - 1, (64, 64, 3), method='lanczos3')
 
-    datasets = (jnp.expand_dims(img, axis=[0, 1]), None)
+    batch = jnp.stack([jnp.stack([img for _ in range(64)], axis=0) for _ in range(100)], axis=0)
+
+    datasets = (batch, None)
 
     seed = 42
 
     key = rd.PRNGKey(seed)
 
-    config = DefaultConfig()
+    config = DefaultConfig.build_from_argv(fallback='configs/default_config/main_config.yaml')
 
     optim = optax.adam(**config.optim)
 
