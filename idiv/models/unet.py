@@ -72,9 +72,11 @@ class UNet(hk.Module):
         dim = self.config.dim
         out_dim = self.config.out_dim
         mults = self.config.mults
+        attention_layers = self.config.attention_layers
         resblock_groups = self.config.resblock_groups
 
         dims = [dim * m for m in mults]
+        attn = [m * dim for m in attention_layers]
 
         time_dim = dim*4
 
@@ -92,7 +94,7 @@ class UNet(hk.Module):
             res.append(x)
 
             x = ResBlock(d, resblock_groups, time_dim=time_dim)(x, time_emb)
-            x = prenorm(x, residual(Attention()))
+            x = prenorm(x, residual(Attention())) if d in attn else x
             res.append(x)
 
             if not d==dims[-1]:
@@ -105,17 +107,15 @@ class UNet(hk.Module):
         for d in reversed(dims):
             x = jnp.concatenate((x, res.pop()), axis=-1)
             x = ResBlock(d, resblock_groups, time_dim=time_dim)(x, time_emb)
-            res.append(x)
 
             x = jnp.concatenate((x, res.pop()), axis=-1)
             x = ResBlock(d, resblock_groups, time_dim=time_dim)(x, time_emb)
-            x = prenorm(x, residual(Attention()))
-            res.append(x)
+            x = prenorm(x, residual(Attention())) if d in attn else x
 
             if not d==dims[0]:
                 x = UpSample(d)(x, is_training)
         
         x = jnp.concatenate((x, r), axis=-1)
         x = ResBlock(dim, resblock_groups, time_dim)(x, time_emb)
-        x = hk.Conv2D(out_dim, 1)
+        x = hk.Conv2D(out_dim, 1)(x)
         return x
