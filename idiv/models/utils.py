@@ -141,7 +141,7 @@ class Block(hk.Module):
         self.groups = groups
     
     def __call__(self, x: jnp.DeviceArray, scale_shift: Optional[Tuple]=None):
-        x = hk.Conv2D(self.out_dim, 3, padding=1)(x)
+        x = hk.Conv2D(self.out_dim, 3, padding=(1, 1))(x)
         x = hk.GroupNorm(self.groups)(x)
 
         if exists(scale_shift):
@@ -162,9 +162,9 @@ class ResBlock(hk.Module):
         
         scale_shift = None
         if exists(self.time_dim) and exists(time_emb):
-            time_emb = hk.Linear(self.time_dim*2)(jax.nn.silu(time_emb))
-            time_emb = time_emb[:, :, None, None]
-            scale_shift = jnp.split(time_emb, 2, axis=1)
+            time_emb = hk.Linear(self.out_dim*2)(jax.nn.silu(time_emb))
+            time_emb = time_emb[:, None, None, :]
+            scale_shift = jnp.split(time_emb, 2, axis=-1)
         
         h = Block(self.out_dim, self.groups)(x, scale_shift=scale_shift)
         h = Block(self.out_dim, self.groups)(h)
