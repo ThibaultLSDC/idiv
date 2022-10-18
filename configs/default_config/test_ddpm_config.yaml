@@ -5,7 +5,7 @@ betas_low: 0.0001
 betas_high: 0.01
 T: 1000
 
-epochs: 10000
+epochs: 400
 
 unet_config: !unet_config
   dim: 32
@@ -13,6 +13,9 @@ unet_config: !unet_config
   mults:
     - 1
     - 2
+    - 4
+    - 8
+  attention_layers:
     - 4
     - 8
   resblock_groups: 8
