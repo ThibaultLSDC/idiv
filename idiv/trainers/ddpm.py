@@ -10,7 +10,7 @@ from tqdm import tqdm
 import jax
 import numpy as np
 
-from idiv.models.unet import UNet64
+from idiv.models.unet import UNet
 
 
 # DDPMStates = namedtuple('DDPMStates', ['params', 'state', 'opt_state'])
@@ -43,23 +43,36 @@ class DDPM:
         self.alphas = 1 - self.betas.copy()
         self.alpha_cumprod = jnp.cumprod(self.alphas)
 
+        self.sigmas = jnp.sqrt((1-self.alpha_cumprod[:-1]) / (1 - self.alpha_cumprod[1:])) \
+            * jnp.sqrt(1 - self.alpha_cumprod[1:] / self.alpha_cumprod[:-1])
+        self.sigmas = jnp.concatenate((jnp.zeros((1,)), self.sigmas))
+
         self.T = config.T
+        self.ema_weight = config.ema_weight
+        self.ema_warmup = config.ema_warmup
 
     @staticmethod
     def build(config):
         @hk.transform_with_state
-        def f(x, is_training):
-            net = UNet64(config.dim)
-            return net(x, is_training)
+        def f(x, t, is_training):
+            net = UNet(config.unet_config)
+            return net(x, t, is_training)
         return f
-
-    def init_model(self, key: rd.KeyArray, batch):
-        params, state = self.init(key, batch, is_training=True)
+ 
+    def init_model(self, key: rd.KeyArray, batch, t):
+        # weights
+        params, state = self.init(key, batch, t, is_training=True)
         opt_state = self.optim.init(params)
-        return params, state, opt_state
 
-    def forward(self, params: hk.Params, state: hk.State, x, is_training: bool):
-        eps, state = self.apply(params, state, None, x, is_training)
+        # ema
+        ema_fn = hk.transform_with_state(lambda x: hk.EMAParamsTree(self.ema_weight, zero_debias=False, warmup_length=self.ema_warmup)(x))
+        _, ema_state = ema_fn.init(None, params)
+
+        return params, state, opt_state, ema_fn, ema_state
+
+    @partial(jit, static_argnums=[0, 5])
+    def forward(self, params: hk.Params, state: hk.State, x, t, is_training: bool):
+        eps, state = self.apply(params, state, None, x, t, is_training)
         return eps, state
 
     @partial(jit, static_argnums=[0, 5])
@@ -73,9 +86,9 @@ class DDPM:
         key, subkey = rd.split(key)
         eps = rd.normal(subkey, x.shape)
 
-        x_t = jnp.sqrt(alphas_cp) * x + jnp.sqrt(1 + alphas_cp) * eps
+        x_t = jnp.sqrt(alphas_cp) * x + jnp.sqrt(1 - alphas_cp) * eps
 
-        pred, state = self.forward(params, state, x_t, is_training)
+        pred, state = self.forward(params, state, x_t, t, is_training)
 
         return jnp.mean((pred - eps)**2), state
 
@@ -100,17 +113,58 @@ class DDPM:
         x_train, x_val = datasets
 
         if model_state is None:
+            t = jnp.ones((x_train.shape[1],), dtype=jnp.float32)
             key, subkey = rd.split(key)
-            params, state, opt_state = self.init_model(subkey, x_train[0])
+            params, state, opt_state, ema_fn, ema_state = self.init_model(subkey, x_train[0], t)
 
         for epoch in range(self.config.epochs):
             running_loss = 0.
             for x in tqdm(x_train, desc=f"Epoch {epoch+1}"):
                 key, subkey = rd.split(key)
                 params, state, opt_state, loss = self.update(params, state, opt_state, subkey, x)
+                ema_params, ema_state = jit(ema_fn.apply)(None, ema_state, None, params)
                 running_loss += loss / x_train.shape[0]
 
             print(f"Epoch {epoch+1}/{self.config.epochs} | loss {running_loss:.5f}")
+
+            if epoch % 10 == 0:
+                key, subkey = rd.split(key)
+                path = f"data/sampling_epoch{epoch+1}.jpg"
+                self.log_img(ema_params, state, subkey, path)
+
+        key, subkey = x(params, state, subkey, path)
+
+        return params, state, opt_state
+    
+    # @partial(jit, static_argnums=0)
+    def img_estimate(self, params: hk.Params, state: hk.State, x_t, t):
+        eps, state = self.forward(params, state, x_t, t, is_training=False)
+        x_0_estimate = (x_t - jnp.sqrt(1 - self.alpha_cumprod[t]) * eps) / jnp.sqrt(self.alpha_cumprod[t])
+        return x_0_estimate, eps, state
+    
+    @partial(jit, static_argnums=0)
+    def sample_one(self, params: hk.Params, state: hk.State, x_t, t, key, eta=1.):
+        x_0, eps, state = self.img_estimate(params, state, x_t, t)
+        noise = rd.normal(key, x_0.shape)
+        x_prev = jnp.sqrt(self.alpha_cumprod[t-1]) * x_0 \
+            + jnp.sqrt(1 - self.alpha_cumprod[t-1] - eta**2 * self.sigmas[t-1]**2) * eps \
+            + eta * self.sigmas[t-1] * noise
+        return x_prev, state
+    
+    # @partial(jit, static_argnums=0)
+    def sample(self, params: hk.Params, state: hk.State, key: rd.KeyArray, eta=1., x_T_shape=(1, 64, 64, 3)):
+        key, subkey = rd.split(key)
+        x_prev = rd.normal(key, x_T_shape)
+        self.alpha_cumprod = jnp.concatenate((jnp.ones((1,)), self.alpha_cumprod))
+        saved = []
+        for t in tqdm(range(self.T, 0, -1), desc='sampling...'):
+            key, subkey = rd.split(key)
+            x_prev, state = self.sample_one(params, state, x_prev, jnp.array([t]), subkey, eta=eta)
+        self.alpha_cumprod = self.alpha_cumprod[1:]
+        print('done inside')
+        return x_prev
+    
+    def log_img(self, params, state, key, path):
 
         x = self.sample(params, state, key)
         print('done sampling')
@@ -120,31 +174,8 @@ class DDPM:
 
         print('done with sampling, saving image')
 
-        Image.fromarray(x_0[0].astype(np.uint8)).save('data/sampling.jpg')
-
-        return params, state, opt_state
-    
-    # @partial(jit, static_argnums=0)
-    def img_estimate(self, params: hk.Params, state: hk.State, x_t, t):
-        eps, state = self.forward(params, state, x_t, is_training=False)
-        x_0_estimate = (x_t - jnp.sqrt(1 - self.alpha_cumprod[t]) * eps) / jnp.sqrt(self.alpha_cumprod[t])
-        return x_0_estimate, eps, state
-    
-    # @partial(jit, static_argnums=0)
-    def sample_one(self, params: hk.Params, state: hk.State, x_t, t):
-        x_0, eps, state = self.img_estimate(params, state, x_t, t)
-        x_prev = jnp.sqrt(self.alpha_cumprod[t-1]) * x_0 + jnp.sqrt(1 - self.alpha_cumprod[t-1]) * eps
-        return x_prev, state
-    
-    # @partial(jit, static_argnums=0)
-    def sample(self, params: hk.Params, state: hk.State, key: rd.KeyArray, x_T_shape=(1, 64, 64, 3)):
-        x_prev = rd.normal(key, x_T_shape)
-        self.alpha_cumprod = jnp.concatenate((jnp.ones((1,)), self.alpha_cumprod))
-        for t in tqdm(range(self.T, 0, -1), desc='sampling...'):
-            x_prev, state = self.sample_one(params, state, x_prev, t)
-        self.alpha_cumprod = self.alpha_cumprod[1:]
-        print('done inside')
-        return x_prev
+        aaa = x_0[0].astype(np.uint8)
+        Image.fromarray(aaa).save(path)
 
 
 if __name__=='__main__':
