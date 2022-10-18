@@ -7,6 +7,13 @@ T: 1000
 
 epochs: 400
 
+ema_weight: 0.9999
+ema_warmup: 1
+
+ddim: !ddim
+  eta: 0.0
+  n_steps: 50
+
 unet_config: !unet_config
   dim: 32
   out_dim: 3

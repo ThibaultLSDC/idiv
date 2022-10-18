@@ -124,7 +124,8 @@ class SinEmbedding(hk.Module):
         self.time_dim = time_dim
     
     def __call__(self, t: jnp.DeviceArray):
-        assert t.ndim == 1
+        assert t.ndim <= 1
+        t = jnp.expand_dims(t, axis=0) if t.ndim==0 else t
         half_dim = self.time_dim//2
         emb = np.log(10000) / (half_dim-1)
         emb = jnp.exp(jnp.arange(0, half_dim, step=1) * -emb)
