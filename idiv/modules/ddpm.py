@@ -9,24 +9,10 @@ from jax import jit, value_and_grad as vgrad
 from tqdm import tqdm
 import jax
 import numpy as np
+import pickle as pkl
 
 from idiv.models.unet import UNet
 from idiv.modules.ddim import DDIMSampler
-
-
-# DDPMStates = namedtuple('DDPMStates', ['params', 'state', 'opt_state'])
-
-@dataclass
-class DDPMStates:
-    params: hk.Params
-    state: hk.State
-    opt_state: optax.OptState
-
-jax.tree_util.register_pytree_node(
-        DDPMStates,
-        lambda xs: ((xs.params, xs.state, xs.opt_state), None),
-        lambda _, xs:  DDPMStates(*xs)
-    )
 
 
 class DDPM:
@@ -65,9 +51,9 @@ class DDPM:
 
         # ema
         ema_fn = hk.transform_with_state(lambda x: hk.EMAParamsTree(self.ema_weight, zero_debias=False, warmup_length=self.ema_warmup)(x))
-        _, ema_state = ema_fn.init(None, params)
+        _, ema_fn_state = ema_fn.init(None, params)
 
-        return params, state, opt_state, ema_fn, ema_state
+        return params, state, opt_state, ema_fn, ema_fn_state
 
     @partial(jit, static_argnums=[0, 5])
     def forward(self, params: hk.Params, state: hk.State, x, t, is_training: bool):
@@ -107,21 +93,21 @@ class DDPM:
         self,
         key: rd.KeyArray,
         datasets: tuple,
-        model_state: DDPMStates=None):
+        model_path: str=None):
 
         x_train, x_val = datasets
 
-        if model_state is None:
+        if model_path is None:
             t = jnp.ones((x_train.shape[1],), dtype=jnp.float32)
             key, subkey = rd.split(key)
-            params, state, opt_state, ema_fn, ema_state = self.init_model(subkey, x_train[0], t)
+            params, state, opt_state, ema_fn, ema_fn_state = self.init_model(subkey, x_train[0], t)
 
         for epoch in range(self.config.epochs):
             running_loss = 0.
             for x in tqdm(x_train, desc=f"Epoch {epoch+1}"):
                 key, subkey = rd.split(key)
                 params, state, opt_state, loss = self.update(params, state, opt_state, subkey, x)
-                ema_params, ema_state = jit(ema_fn.apply)(None, ema_state, None, params)
+                ema_params, ema_fn_state = jit(ema_fn.apply)(None, ema_fn_state, None, params)
                 running_loss += loss / x_train.shape[0]
 
             print(f"Epoch {epoch+1}/{self.config.epochs} | loss {running_loss:.5f}")
@@ -131,22 +117,69 @@ class DDPM:
                 path = f"data/sampling_epoch{epoch+1}.jpg"
                 self.log_img(ema_params, state, subkey, path)
 
-        key, subkey = x(params, state, subkey, path)
+                self.save_model(
+                    f"data/test_model.pkl",
+                    params,
+                    state,
+                    opt_state,
+                    ema_params,
+                    ema_fn_state,
+                )
+                params, state, opt_state, ema_params, ema_fn_state = self.load_model(f"data/test_model.pkl")
 
-        return params, state, opt_state
+        key, subkey = rd.split(key)
+        path = f"data/sampling_final.jpg"
+        self.log_img(ema_params, state, subkey, path)
+
+        return params, state, opt_state, ema_params, ema_fn_state
     
     def sample(self, key, params, state, shape=(1, 64, 64, 3), n_steps=200, eta=0.):
         return self.sampler.sample(key, params, state, shape, n_steps, eta)
     
     def log_img(self, params, state, key, path):
 
-        x = self.sample(key, params, state, n_steps=self.config.ddim.n_steps, eta=self.config.ddim.eta)
+        x = self.sample(
+            key,
+            params,
+            state,
+            n_steps=self.config.ddim.n_steps,
+            eta=self.config.ddim.eta,
+        )
         y = np.array(x)
         x_0 = (y.clip(-1, 1) + 1) * 127.5
 
         print('done with sampling, saving image')
 
         Image.fromarray(x_0[0].astype(np.uint8)).save(path)
+
+    @staticmethod
+    def save_model(path,
+                   params,
+                   state,
+                   opt_state,
+                   ema_params,
+                   ema_fn_state):
+        ckpt = {
+            'params': params,
+            'state': state,
+            'opt_state': opt_state,
+            'ema_params': ema_params,
+            'ema_fn_state': ema_fn_state,
+        }
+        with open(path, 'wb') as f:
+            pkl.dump(ckpt, f)
+
+    @staticmethod
+    def load_model(path):
+        with open(path, 'rb') as f:
+            ckpt = pkl.load(f)
+        return (
+            ckpt['params'],
+            ckpt['state'],
+            ckpt['opt_state'],
+            ckpt['ema_params'],
+            ckpt['ema_fn_state']
+        )
 
 
 if __name__=='__main__':
