@@ -117,5 +117,5 @@ class UNet(hk.Module):
         
         x = jnp.concatenate((x, r), axis=-1)
         x = ResBlock(dim, resblock_groups, time_dim)(x, time_emb)
-        x = hk.Conv2D(out_dim, 1)(x)
+        x = hk.Conv2D(out_dim, 1, w_init=hk.initializers.Constant(0))(x)
         return x

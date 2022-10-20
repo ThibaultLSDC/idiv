@@ -55,7 +55,7 @@ class Attention(hk.Module):
     def __call__(self, x, return_attn=False):
         bs, height, width, c = x.shape
 
-        initializer = hk.initializers.VarianceScaling(2.)
+        initializer = hk.initializers.VarianceScaling(1.)
 
         # bs, l, k, 3*h*d
         qkv = hk.Conv2D(self.total_dim * 3, 1, w_init=initializer)(x)
@@ -142,7 +142,8 @@ class Block(hk.Module):
         self.groups = groups
     
     def __call__(self, x: jnp.DeviceArray, scale_shift: Optional[Tuple]=None):
-        x = hk.Conv2D(self.out_dim, 3, padding=(1, 1))(x)
+        initializer = hk.initializers.VarianceScaling()
+        x = hk.Conv2D(self.out_dim, 3, padding=(1, 1), w_init=initializer)(x)
         x = hk.GroupNorm(self.groups)(x)
 
         if exists(scale_shift):

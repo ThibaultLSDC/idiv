@@ -14,6 +14,15 @@ from functools import partial
 
 from tqdm import tqdm
 
+import jmp
+
+
+# juste un container utile pour les différents types et les fonctions de cast
+policy = jmp.Policy(
+    param_dtype=jnp.float32,
+    compute_dtype=jnp.float16,
+    output_dtype=jnp.float16,
+)
 
 @jit
 def normalize(x):
@@ -95,11 +104,11 @@ class Classifier:
         opt_state = self.optim.init(params)
         return params, opt_state
 
-    # @partial(jit, static_argnums=[0, 4])
+    @partial(jit, static_argnums=[0, 4])
     def forward(self, params: hk.Params, key: random.KeyArray, x: jnp.ndarray, is_training: bool):
         pred = self.apply(params, key, x, is_training)
         return pred
-    
+
     @partial(jit, static_argnums=[0, 5])
     def loss_and_pred(self, params: hk.Params, key: random.KeyArray, x: jnp.ndarray, y: jnp.ndarray, is_training: bool):
         pred = self.forward(params, key, x, is_training)
@@ -162,6 +171,8 @@ if __name__=='__main__':
     seed = 42
     epochs = 10
     batch_size = 128
+
+    hk.mixed_precision.set_policy(Net, policy)
 
     key1, key2 = random.split(random.PRNGKey(seed))
 

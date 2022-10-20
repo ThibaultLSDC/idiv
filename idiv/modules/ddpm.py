@@ -12,8 +12,22 @@ import numpy as np
 import pickle as pkl
 
 from idiv.models.unet import UNet
+from idiv.models.utils import ResBlock, Block, Attention
 from idiv.modules.ddim import DDIMSampler
 
+import jmp
+
+
+policy = jmp.Policy(
+    param_dtype=jnp.float32,
+    compute_dtype=jnp.float16,
+    output_dtype=jnp.float16
+)
+bn_policy = jmp.Policy(
+    param_dtype=jnp.float32,
+    compute_dtype=jnp.float32,
+    output_dtype=jnp.float16
+)
 
 class DDPM:
     def __init__(self, config, optim: optax.GradientTransformation) -> None:
@@ -35,6 +49,8 @@ class DDPM:
         self.ema_warmup = config.ema_warmup
 
         self.sampler = DDIMSampler(self.alpha_cumprod, self.apply, self.T)
+
+        self.loss_scale = jmp.StaticLossScale(2**15)
 
     @staticmethod
     def build(config):
@@ -75,19 +91,36 @@ class DDPM:
 
         pred, state = self.forward(params, state, x_t, t, is_training)
 
-        return jnp.mean((pred - eps)**2), state
+        return self.loss_scale.scale(jnp.mean((pred - eps)**2)), state
 
     @partial(jit, static_argnums=[0])
     def update(self, params, state, opt_state, key, x):
 
         loss_and_grad = vgrad(self.loss, has_aux=True, allow_int=True)
 
-        (loss, state), grads = loss_and_grad(params, state, key, x, True)
+        (loss, new_state), grads = loss_and_grad(params, state, key, x, True)
 
-        updates, opt_state = self.optim.update(grads, opt_state, params)
-        params = optax.apply_updates(params, updates)
+        def l2norm(params):
+            ps = jax.tree_util.tree_flatten(params)[0]
+            ps = jnp.array([jnp.sum(p)**2 for p in ps])
+            return jnp.sqrt(jnp.sum(ps))
+        norm = l2norm(params)
 
-        return params, state, opt_state, loss
+        grads = policy.cast_to_compute(grads)
+        grads = self.loss_scale.unscale(grads)
+        grads = policy.cast_to_param(grads)
+
+        updates, new_opt_state = self.optim.update(grads, opt_state, params)
+        new_params = optax.apply_updates(params, updates)
+
+        grads_finite = jmp.all_finite(grads)
+        # self.loss_scale = self.loss_scale.adjust(grads_finite)
+        new_params, new_state, new_opt_state = jmp.select_tree(
+            grads_finite,
+            (new_params, new_state, new_opt_state),
+            (params, state, opt_state))
+
+        return new_params, new_state, new_opt_state, loss, norm
 
     def fit(
         self,
@@ -104,13 +137,15 @@ class DDPM:
 
         for epoch in range(self.config.epochs):
             running_loss = 0.
-            for x in tqdm(x_train, desc=f"Epoch {epoch+1}"):
+            running_grad = 0.
+            counter = tqdm(enumerate(x_train), desc=f"Epoch {epoch+1}", total=x_train.shape[0])
+            for i, x in counter:
                 key, subkey = rd.split(key)
-                params, state, opt_state, loss = self.update(params, state, opt_state, subkey, x)
+                params, state, opt_state, loss, grad_norm = self.update(params, state, opt_state, subkey, x)
                 ema_params, ema_fn_state = jit(ema_fn.apply)(None, ema_fn_state, None, params)
-                running_loss += loss / x_train.shape[0]
-
-            print(f"Epoch {epoch+1}/{self.config.epochs} | loss {running_loss:.5f}")
+                running_loss = running_loss*i/(i+1) + loss / (i+1)
+                running_grad = running_grad*i/(i+1) + grad_norm / (i+1)
+                counter.set_description(f"Epoch {epoch+1}/{self.config.epochs} | loss {running_loss:.5f} | grad {running_grad:.5f}")
 
             if epoch % 10 == 0:
                 key, subkey = rd.split(key)
@@ -190,7 +225,14 @@ if __name__=='__main__':
 
     import jax
 
-    img = jnp.array(Image.open('/home/ty/Documents/code/idiv/data/risitas.jpg'), dtype=jnp.float32)
+    hk.mixed_precision.set_policy(UNet, policy)
+    hk.mixed_precision.set_policy(hk.EMAParamsTree, bn_policy)
+    hk.mixed_precision.set_policy(hk.BatchNorm, bn_policy)
+    hk.mixed_precision.set_policy(Attention, policy)
+    hk.mixed_precision.set_policy(Block, policy)
+    hk.mixed_precision.set_policy(ResBlock, policy)
+
+    img = jnp.array(Image.open('/home/ty/Documents/code/idiv/data/risitas.jpg'), dtype=policy.compute_dtype)
 
     img = jax.image.resize(img / 127.5 - 1, (64, 64, 3), method='lanczos3')
 

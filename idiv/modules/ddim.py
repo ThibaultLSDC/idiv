@@ -53,7 +53,7 @@ class DDIMSampler:
         key, subkey = rd.split(key)
         x_t = rd.normal(subkey, shape)
 
-        for t, t_prev in tqdm(timesteps, desc=f"sampling {n_steps} ddim steps, eta={eta}"):
+        for t, t_prev in tqdm(timesteps, desc=f"sampling {n_steps} ddim steps, eta={eta}", total=n_steps-1):
             key, subkey = rd.split(key)
             x_t = self.p_sample(subkey, params, state, x_t, t, t_prev, eta)
         
